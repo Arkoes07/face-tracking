@@ -28,7 +28,11 @@ dlib::shape_predictor DLIB_PREDICTOR;
 
 // function declaration
 void predictLandmarks(dlib::full_object_detection& container, cv::Mat& inFrame);
+float pointEuclideanDist(dlib::point p, dlib::point q);
+float eyeAspectRatio(std::vector<dlib::point> coordinates);
 void drawLandmarks(cv::Mat& frame, dlib::full_object_detection& landmarks);
+
+int blinkCounter = 0;
 
 int main()
 {
@@ -78,6 +82,9 @@ int main()
 		// write fps on frame
 		std::string textToDisplay = "Duration: " + std::to_string(duration.count()) + " seconds, Frame Processed: " + std::to_string(int(frameCounter)) + ", Average FPS: " + std::to_string(fps);
 		cv::putText(currentFrame, textToDisplay, cv::Point(20, currentFrame.rows - 20), cv::FONT_HERSHEY_DUPLEX, 0.5, CV_RGB(0, 255, 0), 2);
+
+		// write blink on frame
+		cv::putText(currentFrame, "Blink: "+std::to_string(blinkCounter), cv::Point(20, 20), cv::FONT_HERSHEY_DUPLEX, 0.5, CV_RGB(0, 255, 0), 2);
 
 		// Display current frame
 		cv::imshow("Frame", currentFrame);
@@ -161,13 +168,36 @@ void predictLandmarks(dlib::full_object_detection& container, cv::Mat& inFrame) 
 	container = DLIB_PREDICTOR(image, face);
 }
 
+float pointEuclideanDist(dlib::point p, dlib::point q) {
+	float a = (float)q.x() - (float)p.x();
+	float b = (float)q.y() - (float)p.y();
+	return std::sqrt(a * a + b * b);
+}
+
+float eyeAspectRatio(std::vector<dlib::point> coordinates) {
+	// compute the euclidean distances between the two sets of vertical eye landmarks(x, y) - coordinates
+	float a = pointEuclideanDist(coordinates[1], coordinates[5]);
+	float b = pointEuclideanDist(coordinates[2], coordinates[4]);
+	// compute the euclidean distance between the horizontal eye landmark(x, y) - coordinates
+	float c = pointEuclideanDist(coordinates[0], coordinates[3]);
+	// compute eye aspect ratio
+	return (a + b) / (2 * c);
+}
+
 void drawLandmarks(cv::Mat& frame, dlib::full_object_detection& landmarks) {
 	// right eye, left eye, mouth
+	float aspectRatio[2];
 	for (int i = 0; i < 3; ++i) {
+		std::vector<dlib::point> coordinates;
 		// for each part (right eye, left eye, mouth)
 		for (int pointIdx = BOUNDARY[i][0]; pointIdx <= BOUNDARY[i][1]; ++pointIdx) {
 			dlib::point point = landmarks.part(pointIdx);
+			coordinates.emplace_back(std::forward<dlib::point>(point));
 			cv::circle(frame, cv::Point(point.x(), point.y()), 1, CV_RGB(0, 255, 0), 2);
 		}
+		if (i != 2) 
+			aspectRatio[i] = eyeAspectRatio(coordinates);
 	}
+	if (aspectRatio[0] < 0.3 && aspectRatio[1] < 0.3)
+		blinkCounter++;
 }
