@@ -6,6 +6,6 @@ find_package(OpenCV REQUIRED)
 find_package(dlib REQUIRED)
 
 # Add source to this project's executable.
-add_executable (FaceTracking "FaceTracking.cpp")
+add_executable (FaceTracking "FaceTracking.cpp" "LandmarkPredictor.cpp"  "LandmarkPredictor.h")
 
 target_link_libraries (FaceTracking ${OpenCV_LIBS} dlib::dlib)
