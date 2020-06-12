@@ -1,6 +1,10 @@
 ﻿#include <iostream>
 #include <chrono> 
 #include <opencv2/opencv.hpp>
+#include <opencv2/features2d.hpp>  // FAST
+#include <opencv2/core/core.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/video/tracking.hpp>
 #include <dlib/image_processing/frontal_face_detector.h>
 #include <dlib/image_processing.h>
 #include <dlib/opencv/cv_image.h>
@@ -14,6 +18,7 @@ const std::string CAFFE_WEIGHT_FILE = "D:\\models\\cvDnn\\res10_300x300_ssd_iter
 const std::string DLIB_LANDMARKS_MODEL = "D:\\resource\\shape_predictor_68_face_landmarks.dat";
 // part of eyes and mouth on predicted landmark
 const int BOUNDARY[3][2] = { {36,41}, {42,47}, {60,67} };
+const int PART[3][2] = { {0,5}, {6,11}, {12,19} };
 
 // OpenCV DNN
 cv::dnn::Net DNN_NET;
@@ -28,11 +33,87 @@ dlib::shape_predictor DLIB_PREDICTOR;
 
 // function declaration
 void predictLandmarks(dlib::full_object_detection& container, cv::Mat& inFrame);
-float pointEuclideanDist(dlib::point p, dlib::point q);
-float eyeAspectRatio(std::vector<dlib::point> coordinates);
-void drawLandmarks(cv::Mat& frame, dlib::full_object_detection& landmarks);
+std::vector<cv::Point2f> getCoordinatesFromLandmarks(dlib::full_object_detection shape);
+float pointEuclideanDist(cv::Point2f p, cv::Point2f q);
+float eyeAspectRatio(std::vector<cv::Point2f> coordinates);
+void checkEyeClosed(std::vector<cv::Point2f> points);
+void drawLandmarks(cv::Mat& frame, std::vector<cv::Point2f> points);
 
-int blinkCounter = 0;
+float EYE_CLOSED_THRESHOLD = 0.2;
+int eyeClosedCounter = 0;
+
+// -------------------------------------------------------------------------------------------------
+// -- Lucas-Kanade Optical Flow Tracker
+// -------------------------------------------------------------------------------------------------
+namespace LK {
+	const int MAX_FRAME_COUNT = 10;
+	const int PYRAMIDS = 3;
+
+	// variables
+	int frameCount = 0;
+	bool isTracking = false;
+	cv::Mat prev_img;
+	std::vector<cv::Point2f> prev_pts;
+	std::vector<cv::Point2f> next_pts;
+	const cv::TermCriteria criteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 25, 0.01);
+	const cv::Size ROI(20, 20);
+
+	/** Initialize tracking with the current frame and detected landmarks */
+	void start(cv::Mat mat, dlib::full_object_detection& pts) {
+		// convert to grayscale
+		cv::cvtColor(mat, mat, cv::COLOR_BGR2GRAY);
+
+		// release stuff..
+		prev_img.release();
+		prev_img = mat;
+		prev_pts.clear();
+		next_pts.clear();
+
+		// get points
+		prev_pts = getCoordinatesFromLandmarks(pts);
+		
+		// reset count
+		frameCount = 0;
+		isTracking = true;
+	}
+
+	/** tracking points in the next captured frame */
+	vector<cv::Point2f> track(cv::Mat frame) {
+		vector<uchar> status;
+		vector<float> err;
+		vector<cv::Point2f> tracked;
+
+		// convert to grayscale
+		cv::cvtColor(frame, frame, cv::COLOR_BGR2GRAY);
+
+		// get the new points from the old one
+		calcOpticalFlowPyrLK(prev_img, frame, prev_pts, next_pts, status, err, ROI, PYRAMIDS, criteria);
+
+		for (int i = 0; i < status.size(); ++i) {
+			if (status[i] == 0) {
+				// flow not found: take the old point
+				tracked.push_back(prev_pts[i]);
+			}
+			else {
+				// flow found: take the new point
+				tracked.push_back(next_pts[i]);
+			}
+		}
+
+		// switch the previous points and image with the current
+		swap(prev_img, frame);
+		swap(prev_pts, tracked);
+		next_pts.clear();
+
+		// increase tracking frame count
+		if (frameCount++ > MAX_FRAME_COUNT) {
+			isTracking = false;
+		}
+
+		return prev_pts;
+	}
+}
+// -------------------------------------------------------------------------------------------------
 
 int main()
 {
@@ -49,6 +130,15 @@ int main()
 	// open camera
 	cv::VideoCapture cap(0);
 
+	// open video file
+	//cv::VideoCapture cap("D:\\datasets\\ngantuk\\01\\0.mp4");
+
+	//if (!cap.isOpened())  // isOpened() returns true if capturing has been initialized.
+	//{
+	//	cout << "Cannot open the video file. \n";
+	//	return -1;
+	//}
+
 	// current frame container
 	cv::Mat currentFrame;
 
@@ -61,17 +151,40 @@ int main()
 		// read current frame
 		cap.read(currentFrame);
 
-		try {
-			// predict landmarks
-			predictLandmarks(landmarks, currentFrame);
+		// container for points from all areas of interest
+		std::vector<cv::Point2f> coordinates;
 
-			// draw landmarks
-			drawLandmarks(currentFrame, landmarks);
+		// Check if the program is in tracking mode
+		if (!LK::isTracking) {
+			// detect landmarks
+			try {
+				predictLandmarks(landmarks, currentFrame);
+
+				// get points from all areas of interest
+				coordinates = getCoordinatesFromLandmarks(landmarks);
+
+				// comment to disable tracking for the next frames
+				LK::start(currentFrame, landmarks);
+			}
+			catch (int errorCode) {
+				if (errorCode == 1) {
+					std::cout << "no face detected" << std::endl;
+					LK::isTracking = false;
+				}
+			}
 		}
-		catch (int errorCode) {
-			if (errorCode == 1)
-				std::cout << "no face detected" << std::endl;
+		else {
+			// get points from track
+			coordinates = LK::track(currentFrame);
 		}
+
+		if (!coordinates.empty()) {
+			// check eye closed
+			checkEyeClosed(coordinates);
+		}
+
+		// draw landmark points on frame
+		drawLandmarks(currentFrame, coordinates);
 
 		// update video information
 		frameCounter++;
@@ -84,14 +197,14 @@ int main()
 		cv::putText(currentFrame, textToDisplay, cv::Point(20, currentFrame.rows - 20), cv::FONT_HERSHEY_DUPLEX, 0.5, CV_RGB(0, 255, 0), 2);
 
 		// write blink on frame
-		cv::putText(currentFrame, "Blink: "+std::to_string(blinkCounter), cv::Point(20, 20), cv::FONT_HERSHEY_DUPLEX, 0.5, CV_RGB(0, 255, 0), 2);
+		cv::putText(currentFrame, "eye closed counter: "+std::to_string(eyeClosedCounter), cv::Point(20, 20), cv::FONT_HERSHEY_DUPLEX, 0.5, CV_RGB(0, 255, 0), 2);
 
 		// Display current frame
 		cv::imshow("Frame", currentFrame);
 
 		// Press ESC on keyboard to exit
-		char c = (char)cv::waitKey(25);
-		if (c == 27)
+		char c = (char)cv::waitKey(1);
+		if (c == 27)			
 			break;
 	}
 
@@ -168,13 +281,25 @@ void predictLandmarks(dlib::full_object_detection& container, cv::Mat& inFrame) 
 	container = DLIB_PREDICTOR(image, face);
 }
 
-float pointEuclideanDist(dlib::point p, dlib::point q) {
-	float a = (float)q.x() - (float)p.x();
-	float b = (float)q.y() - (float)p.y();
+std::vector<cv::Point2f> getCoordinatesFromLandmarks(dlib::full_object_detection shape) {
+	std::vector<cv::Point2f> coordinates;
+	for (int idx = 0; idx < 3; ++idx) {
+		for (unsigned long pointIdx = BOUNDARY[idx][0]; pointIdx <= BOUNDARY[idx][1]; ++pointIdx) {
+			// push to container
+			dlib::point pt = shape.part(pointIdx);
+			coordinates.emplace_back(std::forward<cv::Point2f>(cv::Point2f(pt.x(), pt.y())));
+		}
+	}
+	return coordinates;
+}
+
+float pointEuclideanDist(cv::Point2f p, cv::Point2f q) {
+	float a = q.x - p.x;
+	float b = q.y - p.y;
 	return std::sqrt(a * a + b * b);
 }
 
-float eyeAspectRatio(std::vector<dlib::point> coordinates) {
+float eyeAspectRatio(std::vector<cv::Point2f> coordinates) {
 	// compute the euclidean distances between the two sets of vertical eye landmarks(x, y) - coordinates
 	float a = pointEuclideanDist(coordinates[1], coordinates[5]);
 	float b = pointEuclideanDist(coordinates[2], coordinates[4]);
@@ -184,20 +309,22 @@ float eyeAspectRatio(std::vector<dlib::point> coordinates) {
 	return (a + b) / (2 * c);
 }
 
-void drawLandmarks(cv::Mat& frame, dlib::full_object_detection& landmarks) {
-	// right eye, left eye, mouth
+void checkEyeClosed(std::vector<cv::Point2f> points) {
 	float aspectRatio[2];
-	for (int i = 0; i < 3; ++i) {
-		std::vector<dlib::point> coordinates;
+	for (int i = 0; i < 2; ++i) {
+		std::vector<cv::Point2f> coordinates;
 		// for each part (right eye, left eye, mouth)
-		for (int pointIdx = BOUNDARY[i][0]; pointIdx <= BOUNDARY[i][1]; ++pointIdx) {
-			dlib::point point = landmarks.part(pointIdx);
-			coordinates.emplace_back(std::forward<dlib::point>(point));
-			cv::circle(frame, cv::Point(point.x(), point.y()), 1, CV_RGB(0, 255, 0), 2);
+		for (int pointIdx = PART[i][0]; pointIdx <= PART[i][1]; ++pointIdx) {
+			coordinates.emplace_back(std::forward<cv::Point2f>(points[pointIdx]));
 		}
-		if (i != 2) 
-			aspectRatio[i] = eyeAspectRatio(coordinates);
+		aspectRatio[i] = eyeAspectRatio(coordinates);
 	}
-	if (aspectRatio[0] < 0.3 && aspectRatio[1] < 0.3)
-		blinkCounter++;
+	if (aspectRatio[0] < EYE_CLOSED_THRESHOLD && aspectRatio[1] < EYE_CLOSED_THRESHOLD)
+		eyeClosedCounter++;
+}
+
+void drawLandmarks(cv::Mat& frame, std::vector<cv::Point2f> points) {
+	for (auto const& point : points) {
+		cv::circle(frame, point, 1, CV_RGB(0, 255, 0), 2);
+	}
 }
