@@ -20,7 +20,6 @@ void drawLandmarks(cv::Mat& frame, std::vector<cv::Point2f> points);
 float EYE_CLOSED_THRESHOLD = 0.2;
 int eyeClosedCounter = 0;
 
-
 int main()
 {
 	// Setup Face Detector and Facial Landmark Predictor
@@ -55,6 +54,11 @@ int main()
 
 		// read current frame
 		cap.read(currentFrame);
+
+		// check if the video has finished
+		if (currentFrame.empty()) {
+			break;
+		}
 
 		// container for points from all areas of interest
 		std::vector<cv::Point2f> coordinates;
