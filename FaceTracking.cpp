@@ -29,10 +29,10 @@ int main()
 	auto start = std::chrono::high_resolution_clock::now();
 
 	// open camera
-	// cv::VideoCapture cap(0);
+	cv::VideoCapture cap(0);
 
 	// open video file
-	cv::VideoCapture cap("D:\\datasets\\ngantuk\\01\\0.mp4");
+	// cv::VideoCapture cap("D:\\datasets\\ngantuk\\data\\01\\0.mp4");
 
 	if (!cap.isOpened())  // isOpened() returns true if capturing has been initialized.
 	{
